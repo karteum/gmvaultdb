@@ -145,9 +145,6 @@ def scandir(rootdir, outdir, includelist=[]):
     for dirname,_,files in os.walk(rootdir):
         if len(includelist)>0 and not os.path.basename(dirname) in includelist:
             continue
-        if(dirname.endswith('2007-08')): # FIXME: temporary hack => to be removed !
-            db.conn.close()
-            return
         for entry in files:
             if entry.endswith(".meta"):
                 continue
