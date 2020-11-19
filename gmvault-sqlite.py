@@ -54,8 +54,8 @@ def gui(dbfile):
         data=myquery.value(1) # 11
         if data==None or data=="":
             data = "<html><head><title>foobar</title></head><body><pre>" + myquery.value(0) + "</pre></body></html>" # displays body_text when there is no html
-        #else:
-            #FIXME: charset issues within html e.g. <meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+        else:
+            data = re.sub(r'<(meta|META) .*charset=.*>', '', data) # we already converted to utf-8 when storing html in SQLite so we filter lines such as <meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
 
         # I used to do local_webEngineView.setHtml(data), but setHtml has a 2MB size limit => need to switch to setUrl on tmp file for large contents
         tmpfile = '/tmp/gmvault_sqlite_tmp.html' # FIXME: random tmp name. FIXME: delete the tmp file when it's no longer needed
