@@ -45,11 +45,12 @@ from PySide2.QtWidgets import *
 from PySide2.QtWebEngineWidgets import *
 from PySide2.QtCore import *
 from PySide2.QtSql import *
+from PySide2.QtGui import *
 
 def gui(dbfile):
     def loadmsg(item):
         myquery = QSqlQuery()
-        myquery.exec_("select body_text,body_html from messages where id=%d" % (item.siblingAtColumn(0).data()))
+        myquery.exec_("select body_text,body_html,attachments,gmail_labels from messages where id=%d" % (item.siblingAtColumn(0).data()))
         myquery.next()
         data=myquery.value(1) # 11
         if data==None or data=="":
@@ -62,13 +63,18 @@ def gui(dbfile):
         with open(tmpfile, 'wb') as fp:
             fp.write(data.encode())
         local_webEngineView.setUrl(QUrl('file://' + tmpfile))
+        attachlist.clear()
+        for att in myquery.value(2).split('¤'):
+            item = QListWidgetItem(att)
+            item.setData(1, os.path.dirname(dbfile)+'/'+myquery.value(3)+'/'+att)
+            attachlist.addItem(item)
 
     def model_update():
         tmp=lineedit.text()
         if tmp!=None and tmp!="":
             tmp=" where " + tmp
         model.clear()
-        model.setQuery(db.exec_("select id, gmail_threadid thread, gm_id eml, gmail_labels labels, datetime(messages.datetime, 'unixepoch') as dt, msgfrom, msgto, msgcc, subject, flags, signature from messages" + tmp))
+        model.setQuery(db.exec_("select id, gmail_threadid thread, gm_id eml, gmail_labels labels, datetime(messages.datetime, 'unixepoch') as dt, msgfrom, msgto, msgcc, subject, flags, signature, attachments from messages" + tmp))
         while model.canFetchMore():
             model.fetchMore()
         #model.select()
@@ -81,10 +87,17 @@ def gui(dbfile):
     tabview.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
 
     local_webEngineView = QWebEngineView()
+    attachlist = QListWidget()
+    attachlist.doubleClicked.connect(lambda item: QDesktopServices.openUrl(QUrl.fromLocalFile(item.data(1))))
+
+    splitter2 = QSplitter(Qt.Horizontal)
+    splitter2.addWidget(local_webEngineView)
+    splitter2.addWidget(attachlist)
+    splitter2.setSizes([500,20])
 
     splitter = QSplitter(Qt.Vertical)
     splitter.addWidget(tabview)
-    splitter.addWidget(local_webEngineView)
+    splitter.addWidget(splitter2)
     splitter.setSizes([200,200])
 
     vbox = QVBoxLayout()
@@ -102,7 +115,6 @@ def gui(dbfile):
     mainwin2 = QMainWindow()
     mainwin2.setCentralWidget(mainWin)
     mainwin2.addToolBar(toolbar)
-    mainwin2.setLayout(vbox) # FIXME: duplicate with mainWin.setLayout(vbox) ?
 
     availableGeometry = app.desktop().availableGeometry(mainWin)
     mainwin2.resize(availableGeometry.width() * 2 / 3, availableGeometry.height() * 2 / 3)
@@ -419,7 +431,7 @@ class MDB():
         cur.execute("insert into messages values (null, ?,?,?,?, ?,?,?,?, ?,?,?,?, ?, ?)", (
             j["msg_id"], int(j["thread_ids"]), m['labelstr'], int(j['gm_id']),
             int(m['Date_parsed']), m['From'], m['To'], m['Cc'],
-            m["Subject"], m['Body'], m['BodyHTML'], ', '.join(m["Attachments"]), m['flags'], m["signature"]
+            m["Subject"], m['Body'], m['BodyHTML'], '¤'.join(m["Attachments"]), m['flags'], m["signature"]
         ))
 
 
