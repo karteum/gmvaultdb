@@ -324,6 +324,8 @@ def decodepart(part, msgdec, level=0):
         dir=msgdec['Outdir']
         if cset==None or cset=="utf-8//translit" or cset=='utf8':
             cset="utf-8"
+        elif cset=='iso-2022-cn': # this codec is not supported in Python, and they don't care (bug report https://bugs.python.org/issue2066 is closed with status WONTFIX)
+            cset='iso-2022-jp-2' # FIXME: not sure at all and I know nothing about those iso-2022 encodings, but looking at https://docs.python.org/2/library/codecs.html#standard-encodings I wonder whether it might be an alternative ? Anyway I have to choose something...
         elif cset.startswith('charset'):
             cset=cset[cset.find('"')+1:cset.rfind('"')]
         #print('  '*level + 'L' + str(level) + ' -> content-type : ' + ctype + ', cset=' + cset)
@@ -350,8 +352,15 @@ def decodepart(part, msgdec, level=0):
             if filename.startswith('=?'):
                 filename_qp_list = filename.split('?')
                 if filename_qp_list[2] in ["Q", "B", 'q', 'b']:
-                    cset_filename = filename_qp_list[1]
-                    filename = quopri.decodestring(filename_qp_list[3]).decode(cset_filename) # iso8859-1,utf-8,'windows-1252'
+                    cset_filename = filename_qp_list[1] # FIXME: what if multiline filename has different encoding between lines ? (can it happen ?)
+                    filename_tmp = ""
+                    nlines = int((len(filename_qp_list) - 1) / 4)
+                    for k in range(nlines):
+                        filename_tmp += filename_qp_list[3+4*k]
+                    try:
+                        filename = quopri.decodestring(filename_tmp).decode(cset_filename) # filename_qp_list[3]
+                    except UnicodeDecodeError:
+                        filename = quopri.decodestring(filename_qp_list[3]).decode('iso8859-1') # Handle case where utf-8 is announced but the real encoding is different (I only got this bug once and the real encoding was iso8859-1). FIXME: handle more cases i.e. guess the real encoding
 
             filecontents = part.get_payload(decode=True)
             if (filename=="signature.asc" or filename=='PGP.sig') and not 'signature' in msgdec:
