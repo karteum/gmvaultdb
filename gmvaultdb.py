@@ -17,7 +17,7 @@ TODO: (among other things)
 - DB schema is simple but not optimal  (3NF, etc)
 - implement full-text search with sqlite
 - populate contacts and attachments tables
-- show attached files in gui
+- look deeper in winmail.dat (rtf attachments ?) and oledata.mso
 ...
 """
 
@@ -52,7 +52,7 @@ def gui(dbfile):
         myquery = QSqlQuery()
         myquery.exec_("select body_text,body_html,attachments,gmail_labels from messages where id=%d" % (item.siblingAtColumn(0).data()))
         myquery.next()
-        data=myquery.value(1) # 11
+        data=myquery.value(1) # value(1) is html, value(0) is plain text
         if data==None or data=="":
             data = "<html><head><title>foobar</title></head><body><pre>" + myquery.value(0) + "</pre></body></html>" # displays body_text when there is no html
         else:
@@ -77,7 +77,7 @@ def gui(dbfile):
         if tmp!=None and tmp!="":
             tmp=" where " + tmp
         model.clear()
-        model.setQuery(db.exec_("select id, gmail_threadid thread, gm_id eml, gmail_labels labels, datetime(messages.datetime, 'unixepoch') as dt, msgfrom, msgto, msgcc, subject, flags, signature, attachments from messages" + tmp))
+        model.setQuery(db.exec_("select id, gmail_threadid thread, gm_id eml, gmail_labels labels, datetime(messages.datetime, 'unixepoch') as dt, msgfrom, msgto, msgcc, subject, flags, signature, attachments,size,sizeatt,numatt from messages" + tmp))
         while model.canFetchMore():
             model.fetchMore()
         #model.select()
@@ -161,7 +161,7 @@ def md5sum(filename, blocksize=65536):
             hash.update(block)
     return hash.hexdigest()
 
-def scandir(rootdir, outdir, includelist=[]):
+def scandir(rootdir, outdir, includelist=['2009-01']):
     if not os.path.exists(outdir):
         os.makedirs(outdir)
     if os.path.exists(outdir+'/mails.db'):
@@ -213,10 +213,16 @@ def scandir(rootdir, outdir, includelist=[]):
                 continue
             if not 'Body' in msgdec:
                 msgdec['Body'] = None
+            else:
+                msgdec["Size"] += len(msgdec['Body'].encode())
             if not 'BodyHTML' in msgdec:
                 msgdec['BodyHTML'] = None
+            else:
+                msgdec["Size"] += len(msgdec['BodyHTML'].encode()) # by doing it here, we ensure that it also catches the size of attached images (that we embedded in base64 within the html previously)
             if not 'signature' in msgdec:
                 msgdec['signature'] = None
+            else:
+                msgdec["Size"] += len(msgdec['signature'].encode())
             msgdec['flags'] = '_'.join(flags)
             msgdec['gmail_timestamp']=datetime.fromtimestamp(msgjson['internal_date'])
             db.addmail(msgdec, msgjson)
@@ -289,6 +295,9 @@ def decodemail(filename, outdir1, labelstr='Default'):
 
         msgdec['Attachments'] = []
         msgdec['EmbeddedImg'] = {}
+        msgdec['Size'] = 0
+        msgdec['SizeAtt'] = 0
+        msgdec['NumAtt'] = 0
         msgdec['Outdir'] = outdir
         msgdec['labelstr'] = labelstr
         msgdec['Date_parsed'] = dateparse_normalized(msgdec['Date'])
@@ -339,6 +348,8 @@ def decodepart(part, msgdec, level=0):
             fp.write(filecontents)
         os.utime(dir+'/'+filename, (msgdec["Date_parsed"],msgdec["Date_parsed"]))
         msgdec['Attachments'].append(filename)
+        msgdec['SizeAtt'] += len(filecontents)
+        msgdec['NumAtt'] += 1
         return filename
 
     while isinstance(part.get_payload(),email.message.Message):
@@ -462,7 +473,10 @@ class MDB():
                 body_html text,
                 attachments text,
                 flags text,
-                signature text
+                signature text,
+                size integer,
+                sizeatt integer,
+                numatt integer
             );
             create index messages_gm_id_idx on messages(gm_id);
 
@@ -490,10 +504,11 @@ class MDB():
 
     def addmail(self, m, j):
         cur = self.conn.cursor()
-        cur.execute("insert into messages values (null, ?,?,?,?, ?,?,?,?, ?,?,?,?, ?, ?)", (
+        cur.execute("insert into messages values (null, ?,?,?,?, ?,?,?,?, ?,?,?,?, ?, ?,?,?,?)", (
             j["msg_id"], int(j["thread_ids"]), m['labelstr'], int(j['gm_id']),
             int(m['Date_parsed']), m['From'], m['To'], m['Cc'],
-            m["Subject"], m['Body'], m['BodyHTML'], '¤'.join(m["Attachments"]), m['flags'], m["signature"]
+            m["Subject"], m['Body'], m['BodyHTML'], '¤'.join(m["Attachments"]), m['flags'], m["signature"],
+            m["Size"],m["SizeAtt"],m["NumAtt"]
         ))
 
 
