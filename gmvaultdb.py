@@ -164,17 +164,25 @@ def md5sum(filename, blocksize=65536):
 def scandir(rootdir, outdir, includelist=[]):
     if not os.path.exists(outdir):
         os.makedirs(outdir)
-    db=MDB(outdir+'/mails.db')
-    db.createdb()
+    if os.path.exists(outdir+'/mails.db'):
+        db=MDB(outdir+'/mails.db') # don't "drop table if exists" and recreate
+    else:
+        db=MDB(outdir+'/mails.db')
+        db.createdb()
     for dirname,_,files in os.walk(rootdir):
-        if len(includelist)>0 and not os.path.basename(dirname) in includelist:
+        included=False
+        for k in includelist:
+            if k in dirname:
+                included=True
+                break
+        if included==False and len(includelist)>0:
             continue
         for entry in files:
             if entry.endswith(".meta"):
                 continue
             id = entry[:entry.rfind('.eml')]
             if db.checkmail(id):
-                print(id + ' already in DB !')
+                sys.stderr.write("\r\033[KSkipping: " + id)
                 continue
             msgjson=decodejson(dirname+'/'+id+".meta")
 
@@ -221,12 +229,33 @@ def dateparse_normalized(datestr):
             break
     return int(datetime.timestamp(dateparse(tmp)))
 
+def cset_sanitize(cset):
+    if cset==None or cset=="utf-8//translit" or cset=='utf8':
+        cset="utf-8"
+    elif cset=='iso-2022-cn': # this codec is not supported in Python, and they don't care (bug report https://bugs.python.org/issue2066 is closed with status WONTFIX)
+        cset='iso-2022-jp-2' # FIXME: not sure at all and I know nothing about those iso-2022 encodings, but looking at https://docs.python.org/2/library/codecs.html#standard-encodings I wonder whether it might be an alternative ? Anyway I have to choose something...
+    elif cset=='IBM-eucKR':
+        cset='euc_kr'
+    elif cset.startswith('windows-1252'): # There was a bug with charset="windows-1252http-equivContent-Type"
+        cset='windows-1252'
+    elif cset=='windows-874':
+        cset='iso-8859-11' # FIXME: also not sure...
+    elif cset.startswith('charset'):
+        cset=cset[cset.find('"')+1:cset.rfind('"')]
+    try: # got weird charset names such as "charset=y" or "charset=x-binaryenc". Default is to use utf-8 in case of an unknown charset
+        'a'.encode(cset)
+    except LookupError:
+        print("\nUnsupported charset : " + cset)
+        cset='utf-8'
+    return cset
+
 def decodemail(filename, outdir1, labelstr='Default'):
     outdir= outdir1 + '/' + labelstr
     #body = bytes(body,'utf-8').decode('unicode-escape')!
     with open(filename) as fp:
         #msg = email.parser.Parser().parse(fp)
         msg=email.message_from_file(fp)
+        #print(filename)
         #_structure(msg)
         csets=msg.get_charsets()
         cset='utf-8'
@@ -244,11 +273,15 @@ def decodemail(filename, outdir1, labelstr='Default'):
                 if msg[myfield].startswith('=?'):
                     myfield_qp_list = msg[myfield].split('?')
                     if myfield_qp_list[2] in ["Q", "B", 'q', 'b']:
-                        cset = myfield_qp_list[1]
+                        cset = cset_sanitize(myfield_qp_list[1])
                         myfield_val = myfield_qp_list[3].replace('_', ' ')
                     else:
                         myfield_val = msg[myfield][2:-2].replace('_', ' ')
-                    msgdec[myfield] = quopri.decodestring(myfield_val).decode(cset) # iso8859-1,utf-8,'windows-1252'
+                    try:
+                        msgdec[myfield] = quopri.decodestring(myfield_val).decode(cset) # iso8859-1,utf-8,'windows-1252'
+                    except ValueError:
+                        myfield_val2 = quopri.encodestring(myfield_val.encode())
+                        msgdec[myfield] = quopri.decodestring(myfield_val2).decode(cset)
                 else:
                     msgdec[myfield] = msg[myfield]
             else:
@@ -280,27 +313,27 @@ def decodepart(part, msgdec, level=0):
     def extract_file(dir, filename, filecontents):
         if not os.path.exists(dir):
             os.makedirs(dir)
+        if filename==None or filename=="":
+            filename="__noname__"
         hash = hashlib.md5() ; hash.update(filecontents)
         filemd5 = hash.hexdigest()
         while os.path.exists(dir+'/'+filename):
             filemd5_orig = md5sum(dir+'/'+filename)
             if(filemd5==filemd5_orig):
                 return filename # no need to write the file again because content is identical
-            # if we arrive here, this means another file with same filename already exist _and_ has a different content
-            # => if we have many files with same filenames foo.ext, the various files will be named 'foo_@_x_@_.ext', with x an integer (this scale better than having foo_.ext, foo__.ext, etc. because the number of characters that the filesystem supports for filename can be limited)
-            # FIXME: the pattern "_@_" seems rare and weird enough to me so that it would not usually appear in any real-world/attachment filenames, but who knows... ?
-            k = filename.split('_@_')
-            if len(k)==3:
-                filename=k[0] + "_@_" + str(int(k[1])+1) + "_@_" + k[2]
+            # if we arrive here, this means another file with same filename already exist _and_ has a different content => rename new files with __2, __3, etc.
+            ki=filename.rfind('.')
+            if ki>0:
+                k_base=filename[:ki]
+                k_ext=filename[ki:]
             else:
-                ki=filename.rfind('.')
-                if ki>0:
-                    k_base=filename[:ki]
-                    k_ext=filename[ki:]
-                else:
-                    k_base=filename
-                    k_ext=""
-                filename=k_base + '_@_2_@_' + k_ext
+                k_base=filename
+                k_ext=""
+            rx = re.search(r'([^_\.]+)__([0-9]+)',k_base)
+            if rx:
+                filename = rx.group(1) + '__' + str(int(rx.group(2))+1) + k_ext
+            else:
+                filename = k_base + '__2' + k_ext
 
         with open(dir+'/'+filename, 'wb') as fp:
             fp.write(filecontents)
@@ -320,14 +353,8 @@ def decodepart(part, msgdec, level=0):
 
     else:
         ctype = part.get_content_type()
-        cset = part.get_content_charset()
+        cset=cset_sanitize(part.get_content_charset())
         dir=msgdec['Outdir']
-        if cset==None or cset=="utf-8//translit" or cset=='utf8':
-            cset="utf-8"
-        elif cset=='iso-2022-cn': # this codec is not supported in Python, and they don't care (bug report https://bugs.python.org/issue2066 is closed with status WONTFIX)
-            cset='iso-2022-jp-2' # FIXME: not sure at all and I know nothing about those iso-2022 encodings, but looking at https://docs.python.org/2/library/codecs.html#standard-encodings I wonder whether it might be an alternative ? Anyway I have to choose something...
-        elif cset.startswith('charset'):
-            cset=cset[cset.find('"')+1:cset.rfind('"')]
         #print('  '*level + 'L' + str(level) + ' -> content-type : ' + ctype + ', cset=' + cset)
         if(ctype=="text/plain" and not "Body" in msgdec):
             try:
@@ -360,7 +387,7 @@ def decodepart(part, msgdec, level=0):
                     try:
                         filename = quopri.decodestring(filename_tmp).decode(cset_filename) # filename_qp_list[3]
                     except UnicodeDecodeError:
-                        filename = quopri.decodestring(filename_qp_list[3]).decode('iso8859-1') # Handle case where utf-8 is announced but the real encoding is different (I only got this bug once and the real encoding was iso8859-1). FIXME: handle more cases i.e. guess the real encoding
+                        filename = quopri.decodestring(filename_tmp).decode('iso8859-1') # Handle case where utf-8 is announced but the real encoding is different (I only got this bug once and the real encoding was iso8859-1). FIXME: handle more cases i.e. guess the real encoding
 
             filecontents = part.get_payload(decode=True)
             if (filename=="signature.asc" or filename=='PGP.sig') and not 'signature' in msgdec:
@@ -390,7 +417,10 @@ def decodepart(part, msgdec, level=0):
                         dat=a.data[0]
                     extract_file(dir, winname, dat)
             else:
-                extract_file(dir, secure_filename(filename), filecontents)
+                filename = secure_filename(filename)
+                if filename==None or filename=="":
+                    filename="__noname__" + ctype.replace('/','_')
+                extract_file(dir, filename, filecontents)
 
             #elif filename=="smime.p7s": # FIXME: check contents beyond file name 
             #    msgdec['signature'] = part.get_payload(decode=False)
