@@ -69,8 +69,11 @@ def gui(dbfile):
             item.setData(1, os.path.dirname(dbfile)+'/'+myquery.value(3)+'/'+att)
             attachlist.addItem(item)
 
-    def model_update():
-        tmp=lineedit.text()
+    def model_update(item=None):
+        if(item != None):
+            tmp = "labels='%s'" % (item.data(),)
+        else:
+            tmp=lineedit.text()
         if tmp!=None and tmp!="":
             tmp=" where " + tmp
         model.clear()
@@ -85,20 +88,25 @@ def gui(dbfile):
     tabview.clicked.connect(loadmsg)
     tabview.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
     tabview.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
-
+    folderlist = QListWidget()
+    folderlist.clicked.connect(model_update)
     local_webEngineView = QWebEngineView()
     attachlist = QListWidget()
     attachlist.doubleClicked.connect(lambda item: QDesktopServices.openUrl(QUrl.fromLocalFile(item.data(1))))
 
-    splitter2 = QSplitter(Qt.Horizontal)
-    splitter2.addWidget(local_webEngineView)
-    splitter2.addWidget(attachlist)
-    splitter2.setSizes([500,20])
-
-    splitter = QSplitter(Qt.Vertical)
-    splitter.addWidget(tabview)
-    splitter.addWidget(splitter2)
-    splitter.setSizes([200,200])
+    splitter_left = QSplitter(Qt.Vertical)
+    splitter_left.addWidget(tabview)
+    splitter_left.addWidget(local_webEngineView)
+    splitter_left.setSizes([800,800])
+    splitter_right = QSplitter(Qt.Vertical)
+    splitter_right.addWidget(folderlist)
+    splitter_right.addWidget(attachlist)
+    splitter_right.setSizes([800,200])
+    splitter = QSplitter(Qt.Horizontal)
+    splitter.addWidget(splitter_left)
+    splitter.addWidget(splitter_right)
+    splitter.setSizes([800,200])
+    #splitter.setStretchFactor(0,8)
 
     vbox = QVBoxLayout()
     vbox.addWidget(splitter)
@@ -124,6 +132,10 @@ def gui(dbfile):
     if not db.open():
         print("cannot open DB")
         return
+
+    myquery2 = db.exec_("select gmail_labels labels from messages group by labels order by labels")
+    while myquery2.next():
+        folderlist.addItem(myquery2.value(0))
 
     model=QSqlTableModel()
     model_update()
@@ -165,7 +177,6 @@ def scandir(rootdir, outdir, includelist=[]):
                 print(id + ' already in DB !')
                 continue
             msgjson=decodejson(dirname+'/'+id+".meta")
-            sys.stderr.write("\rProcessing: " + dirname+'/'+entry)
 
             # Process labels
             # Labels are concatenated into a single string (so it can correspond to a folder on the filesystem).
@@ -203,10 +214,18 @@ def scandir(rootdir, outdir, includelist=[]):
             db.addmail(msgdec, msgjson)
         db.conn.commit()
 
-def decodemail(filename, outdir1, labelstr='Inbox'):
+def dateparse_normalized(datestr):
+    for tmp in datestr.split(','): # Remove everything before and after (potential) comma, since they are error prone (e.g. if the string starts with "Wen, ..." instead of "Wed, ..." the parser would fail without this. Same with regards to the end of the string)
+        if re.search(r'..:..:..', tmp):
+            tmp = re.sub(r'(.*..:..:..) .*', '\\1', tmp)
+            break
+    return int(datetime.timestamp(dateparse(tmp)))
+
+def decodemail(filename, outdir1, labelstr='Default'):
     outdir= outdir1 + '/' + labelstr
     #body = bytes(body,'utf-8').decode('unicode-escape')!
     with open(filename) as fp:
+        #msg = email.parser.Parser().parse(fp)
         msg=email.message_from_file(fp)
         #_structure(msg)
         csets=msg.get_charsets()
@@ -219,7 +238,6 @@ def decodemail(filename, outdir1, labelstr='Inbox'):
             cset=c
             break
 
-        #msg = email.parser.Parser().parse(fp)
         msgdec={}
         for myfield in ('From', 'To', 'Cc', 'Bcc', 'Date', 'Subject'): # "Received"
             if myfield in msg:
@@ -240,10 +258,9 @@ def decodemail(filename, outdir1, labelstr='Inbox'):
         msgdec['EmbeddedImg'] = {}
         msgdec['Outdir'] = outdir
         msgdec['labelstr'] = labelstr
-        tmp = re.sub(r'(.*..:..:..) .*', '\\1', msgdec['Date'])
-        sys.stderr.write(', date : ' + tmp)
-        dp = dateparse(tmp)
-        msgdec['Date_parsed'] = int(datetime.timestamp(dp))
+        msgdec['Date_parsed'] = dateparse_normalized(msgdec['Date'])
+        sys.stderr.write("\r\033[KProcessing: " + filename + ', date : ' + msgdec['Date'])
+        #sys.stderr.write(', date : ' + msgdec['Date'])
 
     #body2=msg.get_body(preferencelist=('plain', 'html'))
     decodepart(msg, msgdec)
@@ -271,7 +288,7 @@ def decodepart(part, msgdec, level=0):
                 return filename # no need to write the file again because content is identical
             # if we arrive here, this means another file with same filename already exist _and_ has a different content
             # => if we have many files with same filenames foo.ext, the various files will be named 'foo_@_x_@_.ext', with x an integer (this scale better than having foo_.ext, foo__.ext, etc. because the number of characters that the filesystem supports for filename can be limited)
-            # FIXME: the pattern "_@_" seems rare enough to me so that it would not usually appear in  with real-world filenames, but who knows... ?
+            # FIXME: the pattern "_@_" seems rare and weird enough to me so that it would not usually appear in any real-world/attachment filenames, but who knows... ?
             k = filename.split('_@_')
             if len(k)==3:
                 filename=k[0] + "_@_" + str(int(k[1])+1) + "_@_" + k[2]
@@ -315,7 +332,7 @@ def decodepart(part, msgdec, level=0):
                 body = part.get_payload(decode=True).decode(cset)
             except UnicodeDecodeError:
                 body = part.get_payload(decode=False)
-            msgdec['Body'] = body
+            msgdec['Body'] = body # FIXME: change meta charset to utf-8
         elif(ctype=="text/html" and not "BodyHTML" in msgdec):
             try:
                 body = part.get_payload(decode=True).decode(cset)
@@ -330,6 +347,12 @@ def decodepart(part, msgdec, level=0):
             #filename2=email.utils.collapse_rfc2231_value(filename2).strip()
             #filename2=part.get_param('filename', None, 'content-disposition')
             filename=part.get_filename()
+            if filename.startswith('=?'):
+                filename_qp_list = filename.split('?')
+                if filename_qp_list[2] in ["Q", "B", 'q', 'b']:
+                    cset_filename = filename_qp_list[1]
+                    filename = quopri.decodestring(filename_qp_list[3]).decode(cset_filename) # iso8859-1,utf-8,'windows-1252'
+
             filecontents = part.get_payload(decode=True)
             if (filename=="signature.asc" or filename=='PGP.sig') and not 'signature' in msgdec:
                 msgdec['signature'] = filecontents.decode()
@@ -342,7 +365,7 @@ def decodepart(part, msgdec, level=0):
                 #         with open(a.name, "wb") as afp:
                 #             afp.write(a.data)
                 #     sys.exit("Successfully wrote %i files" % len(t.attachments))
-                extract_file(dir, 'winmail.dat', filecontents)
+                extract_file(dir, 'winmail.dat', filecontents) # FIXME: not needed anymore after we extract the other stuffs (embedded RTF, etc)
                 t = TNEF(filecontents, do_checksum=True)
                 #print(t.codepage)
                 #t.dump(force_strings=True)
