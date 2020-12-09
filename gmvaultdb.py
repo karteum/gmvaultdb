@@ -29,20 +29,20 @@ import re
 #import mailparser # I realized afterwards that https://pypi.org/project/mail-parser/ might have done the job instead of writing custom decodemail() / decodepart() routines, but I didn't really test so for the moment I'll keep my own code :)
 #from email.iterators import _structure
 import email,quopri
-import email.contentmanager # FIXME: not used ?
+#import email.contentmanager # FIXME: not used ?
 from werkzeug.utils import secure_filename
 
 import hashlib
 #import xxhash # might replace md5 in the future since I don't need a cryptographically secure hash
 
 import os,sys
-import io # FIXME: unused ?
+#import io # FIXME: unused ?
 import time
 from datetime import datetime
 from dateutil.parser import parse as dateparse
 
 from PySide2.QtWidgets import *
-from PySide2.QtWebEngineWidgets import *
+#from PySide2.QtWebEngineWidgets import *
 from PySide2.QtCore import *
 from PySide2.QtSql import *
 from PySide2.QtGui import *
@@ -58,11 +58,12 @@ def gui(dbfile):
         else:
             data = re.sub(r'<(meta|META) .*charset=.*>', '', data) # we already converted to utf-8 when storing html in SQLite so we filter lines such as <meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
 
+        local_textBrowser.setHtml(data)
         # I used to do local_webEngineView.setHtml(data), but setHtml has a 2MB size limit => need to switch to setUrl on tmp file for large contents
-        tmpfile = '/tmp/gmvault_sqlite_tmp.html' # FIXME: random tmp name. FIXME: delete the tmp file when it's no longer needed
-        with open(tmpfile, 'wb') as fp:
-            fp.write(data.encode())
-        local_webEngineView.setUrl(QUrl('file://' + tmpfile))
+        # tmpfile = '/tmp/gmvault_sqlite_tmp.html' # FIXME: random tmp name. FIXME: delete the tmp file when it's no longer needed
+        # with open(tmpfile, 'wb') as fp:
+        #     fp.write(data.encode())
+        # local_webEngineView.setUrl(QUrl('file://' + tmpfile))
         attachlist.clear()
         for att in myquery.value(2).split('¤'):
             item = QListWidgetItem(att)
@@ -71,16 +72,34 @@ def gui(dbfile):
 
     def model_update(item=None):
         if(item != None):
-            tmp = "labels='%s'" % (item.data(),)
+            #tmp = "labels='%s'" % (item.data(),)
+            tmp = "labels='%s'" % (item.siblingAtColumn(1).data(),)
         else:
             tmp=lineedit.text()
         if tmp!=None and tmp!="":
             tmp=" where " + tmp
         model.clear()
-        model.setQuery(db.exec_("select id, gmail_threadid thread, gm_id eml, gmail_labels labels, datetime(messages.datetime, 'unixepoch') as dt, msgfrom, msgto, msgcc, subject, flags, signature, attachments,size,sizeatt,numatt from messages" + tmp))
+#        model.setQuery(db.exec_("select id, gmail_threadid thread, gm_id eml, gmail_labels labels, datetime(messages.datetime, 'unixepoch') as dt, msgfrom, msgto, msgcc, subject, flags, signature, attachments,size,sizeatt,numatt from messages" + tmp))
+        model.setQuery(db.exec_("select id, gmail_threadid thread, gm_id eml, gmail_labels labels, datetime(messages.datetime, 'unixepoch') as dt, msgfrom, msgto, msgcc, subject, flags, signature, attachments from messages" + tmp))
         while model.canFetchMore():
             model.fetchMore()
         #model.select()
+
+    def createtreeitem(name): # recursive creation of parents items
+        if name in itemlist:
+            return itemlist[name]
+        elif '/' in name:
+            idx = name.rfind('/')
+            parentitem = createtreeitem(name[:idx])
+            item = QTreeWidgetItem(None, [name[idx+1:], name] )
+            itemlist[name] = item
+            parentitem.addChild(item)
+            return item
+        else:
+            item = QTreeWidgetItem(None, [name, name] )
+            itemlist[name] = item
+            foldertree.insertTopLevelItem(0,item)
+            return item
 
     app = QApplication(sys.argv)
 
@@ -88,18 +107,27 @@ def gui(dbfile):
     tabview.clicked.connect(loadmsg)
     tabview.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
     tabview.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
-    folderlist = QListWidget()
-    folderlist.clicked.connect(model_update)
-    local_webEngineView = QWebEngineView()
+    # folderlist = QListWidget()
+    # folderlist.clicked.connect(model_update)
+    foldertree = QTreeWidget()
+    foldertree.setColumnCount(2)
+    foldertree.hideColumn(1)
+    foldertree.clicked.connect(model_update)
+
+    # local_webEngineView = QWebEngineView()
+    local_textBrowser = QTextBrowser() # Actually QTextBrowser is enough to display basic HTML (including images) without js and without security issues that might arise with QWebEngineView parsing potentially hostile HTML...
+    #local_textBrowser.setStyleSheet("background-color: black;")
     attachlist = QListWidget()
     attachlist.doubleClicked.connect(lambda item: QDesktopServices.openUrl(QUrl.fromLocalFile(item.data(1))))
 
     splitter_left = QSplitter(Qt.Vertical)
     splitter_left.addWidget(tabview)
-    splitter_left.addWidget(local_webEngineView)
+    #splitter_left.addWidget(local_webEngineView)
+    splitter_left.addWidget(local_textBrowser)
     splitter_left.setSizes([800,800])
     splitter_right = QSplitter(Qt.Vertical)
-    splitter_right.addWidget(folderlist)
+    #splitter_right.addWidget(folderlist)
+    splitter_right.addWidget(foldertree)
     splitter_right.addWidget(attachlist)
     splitter_right.setSizes([800,200])
     splitter = QSplitter(Qt.Horizontal)
@@ -134,8 +162,10 @@ def gui(dbfile):
         return
 
     myquery2 = db.exec_("select gmail_labels labels from messages group by labels order by labels")
+    itemlist = {}
     while myquery2.next():
-        folderlist.addItem(myquery2.value(0))
+        # folderlist.addItem(myquery2.value(0))
+        createtreeitem(myquery2.value(0))
 
     model=QSqlTableModel()
     model_update()
@@ -165,7 +195,7 @@ def scandir(rootdir, outdir, includelist=['2009-01']):
     if not os.path.exists(outdir):
         os.makedirs(outdir)
     if os.path.exists(outdir+'/mails.db'):
-        db=MDB(outdir+'/mails.db') # don't "drop table if exists" and recreate
+        db=MDB(outdir+'/mails.db') # don't "drop table if exists"
     else:
         db=MDB(outdir+'/mails.db')
         db.createdb()
@@ -270,7 +300,7 @@ def decodemail(filename, outdir1, labelstr='Default'):
                 continue
             if c.startswith('charset'):
                 c=c[c.find('"')+1:c.rfind('"')]
-            cset=c
+            cset=cset_sanitize(c)
             break
 
         msgdec={}
@@ -302,14 +332,15 @@ def decodemail(filename, outdir1, labelstr='Default'):
         msgdec['labelstr'] = labelstr
         msgdec['Date_parsed'] = dateparse_normalized(msgdec['Date'])
         sys.stderr.write("\r\033[KProcessing: " + filename + ', date : ' + msgdec['Date'])
-        #sys.stderr.write(', date : ' + msgdec['Date'])
 
     #body2=msg.get_body(preferencelist=('plain', 'html'))
     decodepart(msg, msgdec)
 
     if not "BodyHTML" in msgdec and "Body" in msgdec and msgdec['Body'].find('[cid:') and len(msgdec['EmbeddedImg'].keys())>0:
+        # When there is only plain text together with embedded images, generate the corresponding HTML with references to images
         msgdec["BodyHTML"] = "<html><head><title></title></head><body><pre>" + re.sub(r'\[(cid:.*)\]', '<img src="\\1">', msgdec['Body']) + "</pre></body></html>"
     if 'BodyHTML' in msgdec and msgdec['BodyHTML'].find('<img src="cid:'):
+        # Embed images referenced in the HTML directly as base64 within the HTML document instead of separate files (so that the HTML is self-sufficient and only other attachments need to be extracted on the filesystem)
         for cid in msgdec['EmbeddedImg'].keys():
             msgdec["BodyHTML"]=msgdec["BodyHTML"].replace("cid:"+cid, msgdec['EmbeddedImg'][cid])
 
@@ -356,7 +387,7 @@ def decodepart(part, msgdec, level=0):
         part=part.get_payload()
     if part.is_multipart():
         for subpart in part.get_payload():
-            decodepart(subpart, msgdec, level+1)
+            decodepart(subpart, msgdec, level+1) # recursive call (theoretically there could be any structure and any levels of nested messages)
         #if ctype=="multipart/alternative":
         #    pass
         #elif ctype=="multipart/related":
@@ -367,30 +398,31 @@ def decodepart(part, msgdec, level=0):
         cset=cset_sanitize(part.get_content_charset())
         dir=msgdec['Outdir']
         #print('  '*level + 'L' + str(level) + ' -> content-type : ' + ctype + ', cset=' + cset)
-        if(ctype=="text/plain" and not "Body" in msgdec):
+        if(ctype=="text/plain" and not "Body" in msgdec): # FIXME: we didn't check whether we are really in a "multipart/alternative" section
             try:
                 body = part.get_payload(decode=True).decode(cset)
             except UnicodeDecodeError:
                 body = part.get_payload(decode=False)
             msgdec['Body'] = body # FIXME: change meta charset to utf-8
-        elif(ctype=="text/html" and not "BodyHTML" in msgdec):
+        elif(ctype=="text/html" and not "BodyHTML" in msgdec): # FIXME: we didn't check whether we are really in a "multipart/alternative" section
             try:
                 body = part.get_payload(decode=True).decode(cset)
             except UnicodeDecodeError:
                 body = part.get_payload(decode=False)
             msgdec['BodyHTML'] = body
-        elif "Content-ID" in part and ctype.startswith("image"):
+        elif "Content-ID" in part and ctype.startswith("image"): # FIXME: we didn't check whether we are really in a "multipart/related" section
             cid=part["Content-ID"][1:-1]
             body=cid
             msgdec['EmbeddedImg'][cid]="data:"+ctype+";base64,"+part.get_payload(decode=False).replace('\n','')
-        elif part.get_filename(): #if ctype.startswith("application") or ctype.startswith("multipart"):
+        elif part.get_filename(): # FIXME: we didn't check whether we are really in a "multipart/mixed" section
+            #if ctype.startswith("application") or ctype.startswith("multipart"):
             #filename2=email.utils.collapse_rfc2231_value(filename2).strip()
             #filename2=part.get_param('filename', None, 'content-disposition')
             filename=part.get_filename()
-            if filename.startswith('=?'):
+            if filename.startswith('=?'): # parse the "Q-encoding"
                 filename_qp_list = filename.split('?')
                 if filename_qp_list[2] in ["Q", "B", 'q', 'b']:
-                    cset_filename = filename_qp_list[1] # FIXME: what if multiline filename has different encoding between lines ? (can it happen ?)
+                    cset_filename = cset_sanitize(filename_qp_list[1]) # FIXME: what if multiline filename has different encoding between lines ? (can it happen ?)
                     filename_tmp = ""
                     nlines = int((len(filename_qp_list) - 1) / 4)
                     for k in range(nlines):
@@ -403,19 +435,22 @@ def decodepart(part, msgdec, level=0):
             filecontents = part.get_payload(decode=True)
             if (filename=="signature.asc" or filename=='PGP.sig') and not 'signature' in msgdec:
                 msgdec['signature'] = filecontents.decode()
+            #elif filename=="smime.p7s": # FIXME: check contents beyond file name 
+            #    msgdec['signature'] = part.get_payload(decode=False)
             # elif filename=='oledata.mso':
             #     pass # FIXME: handle this
             elif filename=='winmail.dat':
-                # def my_tnef_parse(filepath="winmail.dat"):
-                #     t = TNEF(open(filepath).read(), do_checksum=True)
-                #     for a in t.attachments:
-                #         with open(a.name, "wb") as afp:
-                #             afp.write(a.data)
-                #     sys.exit("Successfully wrote %i files" % len(t.attachments))
-                extract_file(dir, 'winmail.dat', filecontents) # FIXME: not needed anymore after we extract the other stuffs (embedded RTF, etc)
+                k=extract_file(dir, 'winmail.dat', filecontents) # FIXME: not needed anymore after we extract the other stuffs (embedded RTF, etc)
                 t = TNEF(filecontents, do_checksum=True)
                 #print(t.codepage)
                 #t.dump(force_strings=True)
+                if hasattr(t,'body'):
+                    extract_file(dir,secure_filename(k)+'.txt', getattr(t, 'body'))
+                if hasattr(t,'htmlbody'):
+                    extract_file(dir,secure_filename(k)+'.html', getattr(t, 'htmlbody'))
+                if hasattr(t,'rtfbody'):
+                    extract_file(dir,secure_filename(k)+'.rtf', getattr(t, 'rtfbody'))
+
                 for a in t.attachments:
                     winname = 'winmail_'+secure_filename(a.long_filename())
                     # if isinstance(a._name, bytes):
@@ -432,9 +467,6 @@ def decodepart(part, msgdec, level=0):
                 if filename==None or filename=="":
                     filename="__noname__" + ctype.replace('/','_')
                 extract_file(dir, filename, filecontents)
-
-            #elif filename=="smime.p7s": # FIXME: check contents beyond file name 
-            #    msgdec['signature'] = part.get_payload(decode=False)
         else:
             body="__None__" #+ str(part.get_payload(decode=True))
 
