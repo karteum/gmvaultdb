@@ -79,8 +79,8 @@ def gui(dbfile):
         if tmp!=None and tmp!="":
             tmp=" where " + tmp
         model.clear()
-#        model.setQuery(db.exec_("select id, gmail_threadid thread, gm_id eml, gmail_labels labels, datetime(messages.datetime, 'unixepoch') as dt, msgfrom, msgto, msgcc, subject, flags, signature, attachments,size,sizeatt,numatt from messages" + tmp))
-        model.setQuery(db.exec_("select id, gmail_threadid thread, gm_id eml, gmail_labels labels, datetime(messages.datetime, 'unixepoch') as dt, msgfrom, msgto, msgcc, subject, flags, signature, attachments from messages" + tmp))
+        model.setQuery(db.exec_("select id, gmail_threadid thread, gm_id eml, gmail_labels labels, datetime(messages.datetime, 'unixepoch') as dt, msgfrom, msgto, msgcc, subject, flags, signature, attachments,size,sizeatt,numatt from messages" + tmp))
+        #model.setQuery(db.exec_("select id, gmail_threadid thread, gm_id eml, gmail_labels labels, datetime(messages.datetime, 'unixepoch') as dt, msgfrom, msgto, msgcc, subject, flags, signature, attachments from messages" + tmp))
         while model.canFetchMore():
             model.fetchMore()
         #model.select()
@@ -435,7 +435,7 @@ def decodepart(part, msgdec, level=0):
             filecontents = part.get_payload(decode=True)
             if (filename=="signature.asc" or filename=='PGP.sig') and not 'signature' in msgdec:
                 msgdec['signature'] = filecontents.decode()
-            #elif filename=="smime.p7s": # FIXME: check contents beyond file name 
+            #elif filename=="smime.p7s": # FIXME: check contents beyond file name
             #    msgdec['signature'] = part.get_payload(decode=False)
             # elif filename=='oledata.mso':
             #     pass # FIXME: handle this
