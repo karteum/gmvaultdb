@@ -191,7 +191,7 @@ def md5sum(filename, blocksize=65536):
             hash.update(block)
     return hash.hexdigest()
 
-def scandir(rootdir, outdir, includelist=['2009-01']):
+def scandir(rootdir, outdir, includelist=[]): # '2009-01'
     if not os.path.exists(outdir):
         os.makedirs(outdir)
     if os.path.exists(outdir+'/mails.db'):
@@ -351,6 +351,8 @@ def decodemail(filename, outdir1, labelstr='Default'):
 # The attached files can then be extracted, but some special cases are pgp signatures (want to keep in the sqlite db rather than extract as a file) and winmail.dat (which themselves embed other parts)
 def decodepart(part, msgdec, level=0):
     def extract_file(dir, filename, filecontents):
+        if filecontents==None:
+            return
         if not os.path.exists(dir):
             os.makedirs(dir)
         if filename==None or filename=="":
@@ -445,11 +447,20 @@ def decodepart(part, msgdec, level=0):
                 #print(t.codepage)
                 #t.dump(force_strings=True)
                 if hasattr(t,'body'):
-                    extract_file(dir,secure_filename(k)+'.txt', getattr(t, 'body'))
+                    data=getattr(t, 'body')
+                    if isinstance(data,str):
+                        data=data.encode()
+                    extract_file(dir,secure_filename(k)+'.txt', data)
                 if hasattr(t,'htmlbody'):
-                    extract_file(dir,secure_filename(k)+'.html', getattr(t, 'htmlbody'))
+                    data=getattr(t, 'htmlbody')
+                    if isinstance(data,str):
+                        data=data.encode()
+                    extract_file(dir,secure_filename(k)+'.html', data)
                 if hasattr(t,'rtfbody'):
-                    extract_file(dir,secure_filename(k)+'.rtf', getattr(t, 'rtfbody'))
+                    data=getattr(t, 'rtfbody')
+                    if isinstance(data,str):
+                        data=data.encode()
+                    extract_file(dir,secure_filename(k)+'.rtf', data)
 
                 for a in t.attachments:
                     winname = 'winmail_'+secure_filename(a.long_filename())
