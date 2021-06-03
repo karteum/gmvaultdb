@@ -48,6 +48,7 @@ from PySide2.QtSql import *
 from PySide2.QtGui import *
 
 def gui(dbfile):
+    cwd = '' if os.path.dirname(dbfile).startswith('/') else os.getcwd()+'/'
     def loadmsg(item):
         myquery = QSqlQuery()
         myquery.exec_("select body_text,body_html,attachments,gmail_labels from messages where id=%d" % (item.siblingAtColumn(0).data()))
@@ -67,7 +68,7 @@ def gui(dbfile):
         attachlist.clear()
         for att in myquery.value(2).split('¤'):
             item = QListWidgetItem(att)
-            item.setData(1, os.path.dirname(dbfile)+'/'+myquery.value(3)+'/'+att)
+            item.setData(1, cwd+os.path.dirname(dbfile)+'/'+myquery.value(3)+'/'+att)
             attachlist.addItem(item)
 
     def model_update(item=None):
