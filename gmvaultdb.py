@@ -5,8 +5,8 @@
 License: GPLv3 https://www.gnu.org/licenses/gpl-3.0.en.html
 
 This program
-- walks through a folder from a GMvault backup (assuming .eml are not gzipped. In my case I archived the whole dir in squashfs-lzma so it was better to leave the eml uncompressed).
-- parses the .meta and .eml files, the latter can be MIME with various encoding, attachments, etc.
+- walks through a folder from a GMvault backup (assuming .eml are not gzipped. In my case I archived the whole dir in squashfs-lzma so it was better to leave the eml uncompressed) and parses the .meta and .eml files, the latter can be MIME with various encoding, attachments, etc.
+- or walks through an mbox file (only tested with mbox from Google Takeout, noting that Google performs some encoding conversions that permanently break all non-ascii characters (they are all replaced by 0xEFBFBD, therefore encoding display issues are not a bug in this script but in the prior encoding bugs on Google Takeout side))
 - stores the emails (header, txt, html, signatures) in an SQLite database. For HTML, the attached images are extracted and inserted as base64 embedded images within the html in order to avoid keeping a separate file
 - extracts the other attached files to a dedicated folder (so all the attached files can be accessed directly through the filesystem). If the same file (same name, same md5) has already been extracted, it will not be stored twice. If a file with similar name but different md5 has already been extracted, it will be stored with a different name
 - adds a small GUI to walk through the emails and add additional "where" conditions to the SQL query (for the moment it works with plain sqlite including "like" clauses. In the future I will test SQLite's full-text search features)
@@ -16,7 +16,6 @@ TODO: (among other things)
 - solve encoding issues for HTML
 - DB schema is simple but not optimal  (3NF, etc)
 - implement full-text search with sqlite
-- populate contacts and attachments tables
 - look deeper in winmail.dat (rtf attachments ?) and oledata.mso
 ...
 """
@@ -67,7 +66,7 @@ def gui(dbfile):
         attachlist.clear()
         for att in myquery.value(2).split('¤'):
             item = QListWidgetItem(att)
-            item.setData(1, os.path.dirname(dbfile)+'/'+myquery.value(3)+'/'+att)
+            item.setData(1, os.path.dirname(os.path.abspath(dbfile))+'/'+myquery.value(3)+'/'+att)
             attachlist.addItem(item)
 
     def model_update(item=None):
@@ -119,6 +118,7 @@ def gui(dbfile):
     #local_textBrowser.setStyleSheet("background-color: black;")
     attachlist = QListWidget()
     attachlist.doubleClicked.connect(lambda item: QDesktopServices.openUrl(QUrl.fromLocalFile(item.data(1))))
+    #attachlist.doubleClicked.connect(lambda item: print(item.data(1)))
 
     splitter_left = QSplitter(Qt.Vertical)
     splitter_left.addWidget(tabview)
@@ -187,11 +187,146 @@ def my_tnef_parse(filepath="winmail.dat"):
 def md5sum(filename, blocksize=65536):
     hash = hashlib.md5()
     with open(filename, "rb") as f:
-        for block in iter(lambda: f.read(blocksize), b""):
+        for block in iter(lambda: f.read(blocksize), b''):
             hash.update(block)
     return hash.hexdigest()
 
-def scandir(rootdir, outdir, includelist=[]): # '2009-01'
+def dateparse_normalized(datestr):
+    datestr=datestr.replace('+0000 GMT','GMT') # "+0000 GMT" raises an error in the date parser
+    for tmp in datestr.split(','): # Remove everything before and after (potential) comma, since they are error prone (e.g. if the string starts with "Wen, ..." instead of "Wed, ..." the parser would fail without this. Same with regards to the end of the string)
+        if re.search(r'..:..:..', tmp):
+            #tmp = re.sub(r'(.*..:..:..) .*', '\\1', tmp)
+            tmp = re.sub(r'(.*..:..:[^\(]*).*', '\\1', tmp) # FIXME: keep year e.g. in case of 'Wed Feb 29 07:02:03 +0000 2012'
+            break
+    return int(datetime.timestamp(dateparse(tmp)))
+    # FIXME "UnknownTimezoneWarning: tzname EDT identified but not understood.  Pass `tzinfos` argument in order to correctly return a timezone-aware datetime.  In a future version, this will raise an exception."
+
+def cset_sanitize(cset):
+    if cset==None or cset=="utf-8//translit" or cset=='utf8':
+        cset="utf-8"
+    elif cset=='iso-2022-cn': # this codec is not supported in Python, and they don't care (bug report https://bugs.python.org/issue2066 is closed with status WONTFIX)
+        cset='iso-2022-jp-2' # FIXME: not sure at all and I know nothing about those iso-2022 encodings, but looking at https://docs.python.org/2/library/codecs.html#standard-encodings I wonder whether it might be an alternative ? Anyway I have to choose something...
+    elif cset=='IBM-eucKR':
+        cset='euc_kr'
+    elif cset.startswith('windows-1252'): # There was a bug with charset="windows-1252http-equivContent-Type"
+        cset='windows-1252'
+    elif cset=='windows-874':
+        cset='iso-8859-11' # FIXME: also not sure...
+    elif cset.startswith('charset'):
+        cset=cset[cset.find('"')+1:cset.rfind('"')]
+    try: # got weird charset names such as "charset=y" or "charset=x-binaryenc". Default is to use utf-8 in case of an unknown charset
+        'a'.encode(cset)
+    except LookupError:
+        print("\nUnsupported charset : " + cset)
+        cset='utf-8'
+    return cset
+
+def qdecode(qstr):
+    # parse the "Q-encoding" (not exhaustive, but it works for my cases)
+    #if myfield_qp_list[2] in ["Q", "B", 'q', 'b']:
+        #cset = cset_sanitize(myfield_qp_list[1])
+        #myfield_val = myfield_qp_list[3].replace('_', ' ')
+    #else:
+        #myfield_val = msg[myfield][2:-2].replace('_', ' ')
+    if qstr.startswith('=?'):
+        qlist = qstr.split('?')
+        if qlist[2] in ["Q", "B", 'q', 'b']:
+            cset = cset_sanitize(qlist[1]) # FIXME: what if multiline q-entry has different encoding between lines ? (can it happen ?)
+            ret_tmp = ""
+            nlines = int((len(qlist) - 1) / 4)
+            for k in range(nlines):
+                ret_tmp += qlist[3+4*k]
+            try:
+                ret = quopri.decodestring(ret_tmp).decode(cset)
+            except UnicodeDecodeError:
+                ret = quopri.decodestring(ret_tmp).decode('iso8859-1') # Handle case where utf-8 is announced but the real encoding is different (I only got this bug once and the real encoding was iso8859-1). FIXME: handle more cases i.e. guess the real encoding
+            except ValueError:
+                ret_tmp = quopri.encodestring(ret_tmp.encode())
+                ret = quopri.decodestring(ret_tmp).decode(cset)
+            return ret
+    return qstr
+
+def mbox_messages(mboxfile):
+    # Generator sending messages one-by-one from mbox. I wrote this after observing that mailbox.mbox(mboxfile) took several minutes before returning the first message (it seems it needs to load/parse the whole mbox before starting, which can take long in the case of large mbox files...)
+    lprev=''
+    text=''
+    with open(mboxfile,'r',encoding='utf8') as f:
+        for line in f:
+            if line.startswith('From ') and lprev=='\n': # FIXME: more reliable trigger ?
+                #msg = email.message_from_bytes(text.encode())
+                msg = email.message_from_string(text)
+                msg.set_unixfrom(line)
+                text=''
+                yield msg
+            lprev=line
+            text+=line
+
+import mmap
+def mbox_messages2(mboxfile):
+    # Alternative approach. May be deleted later since it does not fix encoding issues (which are introduced by Google Takeout...). Need to check which version is faster
+    text=b''
+    mlen = os.path.getsize(mboxfile)
+    with open(mboxfile,'r+b') as f:
+        mm = mmap.mmap(f.fileno(), 0)
+        i1=0
+        while i1 < mlen:
+            i2 = mm.find(b'\r\n\r\nFrom ', i1)
+            if i2==-1: # FIXME: needed ?
+                print('ret')
+                return
+            text = mm[i1:i2]
+            i3=text.find(b'\r\nX-GM-THRID:')
+            msg = email.message_from_bytes(text)
+            msg.set_unixfrom(text[:i3].decode())
+            i1=i2+4 # +4 is to account for '\r\n\r\n'
+            yield msg
+
+#import mailbox
+def scan_mbox(mboxfile, outdir):
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+    if os.path.exists(outdir+'/mails.db'):
+        db=MDB(outdir+'/mails.db') # don't "drop table if exists"
+    else:
+        db=MDB(outdir+'/mails.db')
+        db.createdb()
+    mbox_size = os.path.getsize(mboxfile)
+    #mbox = mailbox.mbox(mboxfile) # FIXME: slow
+    k=0
+    ltot=0
+    for message in mbox_messages(mboxfile): #mbox.items():
+    #for key,message in mbox.items():
+        mfrom=message.get_unixfrom().replace('\n','') # in the case of gmail mbox, includes gmail_id followed by date
+        flags = []
+        labels = []
+        if 'X-Gmail-Labels' in message:
+            entries= qdecode(message['X-Gmail-Labels']).replace('_', ' ').split(',')
+            for l in entries:
+                if l.startswith('[') or l.startswith('IMAP '):
+                    continue
+                elif l in ('Ouvert','Non lus','Important','Favoris','Non lus'):
+                    flags.append(l)
+                else:
+                    labels.append(l)
+            labelstr = '_'.join(labels) if labels!= [] else None
+
+        #print(mfrom)
+        #mfrom=message.get_from() # in the case of gmail mbox, includes gmail_id followed by date
+        msgdec=decodemail(message, outdir, labelstr)
+        if msgdec == None:
+            continue
+        msgdec["msg_id"] = None
+        msgdec["thread_id"] = int(msgdec["X-GM-THRID"])
+        msgdec["gm_id"] = mfrom.split('@xxx')[0] #int(msgjson['gm_id'])
+        msgdec['flags'] = '_'.join(flags) if flags!= [] else None
+        #msgdec['gmail_timestamp']=datetime.fromtimestamp(msgjson['internal_date'])
+        db.addmail(msgdec)
+        db.conn.commit()
+        k+=1
+        ltot+=len(message.as_string())
+        sys.stderr.write(f"\r\033[KProcessing message {k} ({ltot>>20}/{mbox_size>>20} MB) : {msgdec['Date']}")
+
+def scandir_gmvault(rootdir, outdir, includelist=[]): # '2009-01'
     if not os.path.exists(outdir):
         os.makedirs(outdir)
     if os.path.exists(outdir+'/mails.db'):
@@ -238,103 +373,59 @@ def scandir(rootdir, outdir, includelist=[]): # '2009-01'
             if not os.path.exists(outdir + '/' + labelstr):
                 os.makedirs(outdir + '/' + labelstr)
 
-            msgdec=decodemail(dirname+'/'+entry, outdir, labelstr)
-            if not 'Body' in msgdec and not 'BodyHTML' in msgdec:
+            with open(dirname+'/'+entry) as fp:
+                #msg = email.parser.Parser().parse(fp)
+                msg=email.message_from_file(fp)
+            msgdec = decodemail(msg, outdir, labelstr)
+            if msgdec == None:
                 continue
-            if not 'Body' in msgdec:
-                msgdec['Body'] = None
-            else:
-                msgdec["Size"] += len(msgdec['Body'].encode())
-            if not 'BodyHTML' in msgdec:
-                msgdec['BodyHTML'] = None
-            else:
-                msgdec["Size"] += len(msgdec['BodyHTML'].encode()) # by doing it here, we ensure that it also catches the size of attached images (that we embedded in base64 within the html previously)
-            if not 'signature' in msgdec:
-                msgdec['signature'] = None
-            else:
-                msgdec["Size"] += len(msgdec['signature'].encode())
+            msgdec["msg_id"]=msgjson["msg_id"]
+            msgdec["thread_id"] = int(msgjson["thread_ids"])
+            msgdec["gm_id"] = int(msgjson['gm_id'])
             msgdec['flags'] = '_'.join(flags)
             msgdec['gmail_timestamp']=datetime.fromtimestamp(msgjson['internal_date'])
-            db.addmail(msgdec, msgjson)
+            db.addmail(msgdec)
+            sys.stderr.write("\r\033[KProcessing: " + entry + ', date : ' + msgdec['Date'])
         db.conn.commit()
 
-def dateparse_normalized(datestr):
-    for tmp in datestr.split(','): # Remove everything before and after (potential) comma, since they are error prone (e.g. if the string starts with "Wen, ..." instead of "Wed, ..." the parser would fail without this. Same with regards to the end of the string)
-        if re.search(r'..:..:..', tmp):
-            tmp = re.sub(r'(.*..:..:..) .*', '\\1', tmp)
-            break
-    return int(datetime.timestamp(dateparse(tmp)))
+def decodemail(msg, outdir1, labelstr='Default'):
+    #_structure(msg)
+    csets=msg.get_charsets()
+    cset='utf-8'
+    for c in csets:
+        if c==None:
+            continue
+        if c.startswith('charset'):
+            c=c[c.find('"')+1:c.rfind('"')]
+        cset=cset_sanitize(c)
+        break
 
-def cset_sanitize(cset):
-    if cset==None or cset=="utf-8//translit" or cset=='utf8':
-        cset="utf-8"
-    elif cset=='iso-2022-cn': # this codec is not supported in Python, and they don't care (bug report https://bugs.python.org/issue2066 is closed with status WONTFIX)
-        cset='iso-2022-jp-2' # FIXME: not sure at all and I know nothing about those iso-2022 encodings, but looking at https://docs.python.org/2/library/codecs.html#standard-encodings I wonder whether it might be an alternative ? Anyway I have to choose something...
-    elif cset=='IBM-eucKR':
-        cset='euc_kr'
-    elif cset.startswith('windows-1252'): # There was a bug with charset="windows-1252http-equivContent-Type"
-        cset='windows-1252'
-    elif cset=='windows-874':
-        cset='iso-8859-11' # FIXME: also not sure...
-    elif cset.startswith('charset'):
-        cset=cset[cset.find('"')+1:cset.rfind('"')]
-    try: # got weird charset names such as "charset=y" or "charset=x-binaryenc". Default is to use utf-8 in case of an unknown charset
-        'a'.encode(cset)
-    except LookupError:
-        print("\nUnsupported charset : " + cset)
-        cset='utf-8'
-    return cset
+    msgdec={}
+    for myfield in ('From', 'To', 'Cc', 'Bcc', 'Date', 'Subject', 'X-GM-THRID'): # "Received"
+        if myfield in msg:
+            msgdec[myfield]=qdecode(msg[myfield]).replace('_', ' ')
+        else:
+            msgdec[myfield] = None
+    if msgdec['Date']==None:
+        mfrom=msg.get_unixfrom() # in the case of gmail mbox, includes gmail_id followed by date
+        #mfrom=msg.get_from() # in the case of gmail mbox, includes gmail_id followed by date
+        msgdec['Date'] = mfrom.replace('\n','').split('@xxx ')[1]
 
-def decodemail(filename, outdir1, labelstr='Default'):
+    #labelstr = msgdec['X-Gmail-Labels'] if 'X-Gmail-Labels' in msgdec and msgdec['X-Gmail-Labels']!=None else labelstr
     outdir= outdir1 + '/' + labelstr
-    #body = bytes(body,'utf-8').decode('unicode-escape')!
-    with open(filename) as fp:
-        #msg = email.parser.Parser().parse(fp)
-        msg=email.message_from_file(fp)
-        #print(filename)
-        #_structure(msg)
-        csets=msg.get_charsets()
-        cset='utf-8'
-        for c in csets:
-            if c==None:
-                continue
-            if c.startswith('charset'):
-                c=c[c.find('"')+1:c.rfind('"')]
-            cset=cset_sanitize(c)
-            break
-
-        msgdec={}
-        for myfield in ('From', 'To', 'Cc', 'Bcc', 'Date', 'Subject'): # "Received"
-            if myfield in msg:
-                if msg[myfield].startswith('=?'):
-                    myfield_qp_list = msg[myfield].split('?')
-                    if myfield_qp_list[2] in ["Q", "B", 'q', 'b']:
-                        cset = cset_sanitize(myfield_qp_list[1])
-                        myfield_val = myfield_qp_list[3].replace('_', ' ')
-                    else:
-                        myfield_val = msg[myfield][2:-2].replace('_', ' ')
-                    try:
-                        msgdec[myfield] = quopri.decodestring(myfield_val).decode(cset) # iso8859-1,utf-8,'windows-1252'
-                    except ValueError:
-                        myfield_val2 = quopri.encodestring(myfield_val.encode())
-                        msgdec[myfield] = quopri.decodestring(myfield_val2).decode(cset)
-                else:
-                    msgdec[myfield] = msg[myfield]
-            else:
-                msgdec[myfield] = None
-
-        msgdec['Attachments'] = []
-        msgdec['EmbeddedImg'] = {}
-        msgdec['Size'] = 0
-        msgdec['SizeAtt'] = 0
-        msgdec['NumAtt'] = 0
-        msgdec['Outdir'] = outdir
-        msgdec['labelstr'] = labelstr
-        msgdec['Date_parsed'] = dateparse_normalized(msgdec['Date'])
-        sys.stderr.write("\r\033[KProcessing: " + filename + ', date : ' + msgdec['Date'])
+    msgdec['Attachments'] = []
+    msgdec['EmbeddedImg'] = {}
+    msgdec['Size'] = 0
+    msgdec['SizeAtt'] = 0
+    msgdec['NumAtt'] = 0
+    msgdec['Outdir'] = outdir
+    msgdec['labelstr'] = labelstr
+    msgdec['Date_parsed'] = dateparse_normalized(msgdec['Date'])
 
     #body2=msg.get_body(preferencelist=('plain', 'html'))
-    decodepart(msg, msgdec)
+    decodepart(msg, msgdec) # recursive part
+    if not 'Body' in msgdec and not 'BodyHTML' in msgdec:
+        return None
 
     if not "BodyHTML" in msgdec and "Body" in msgdec and msgdec['Body'].find('[cid:') and len(msgdec['EmbeddedImg'].keys())>0:
         # When there is only plain text together with embedded images, generate the corresponding HTML with references to images
@@ -343,6 +434,19 @@ def decodemail(filename, outdir1, labelstr='Default'):
         # Embed images referenced in the HTML directly as base64 within the HTML document instead of separate files (so that the HTML is self-sufficient and only other attachments need to be extracted on the filesystem)
         for cid in msgdec['EmbeddedImg'].keys():
             msgdec["BodyHTML"]=msgdec["BodyHTML"].replace("cid:"+cid, msgdec['EmbeddedImg'][cid])
+
+    if not 'Body' in msgdec:
+        msgdec['Body'] = None
+    else:
+        msgdec["Size"] += len(msgdec['Body'].encode())
+    if not 'BodyHTML' in msgdec:
+        msgdec['BodyHTML'] = None
+    else:
+        msgdec["Size"] += len(msgdec['BodyHTML'].encode()) # by doing it here, we ensure that it also catches the size of attached images (that we embedded in base64 within the html previously)
+    if not 'signature' in msgdec:
+        msgdec['signature'] = None
+    else:
+        msgdec["Size"] += len(msgdec['signature'].encode())
 
     return msgdec
 
@@ -421,19 +525,7 @@ def decodepart(part, msgdec, level=0):
             #filename2=email.utils.collapse_rfc2231_value(filename2).strip()
             #filename2=part.get_param('filename', None, 'content-disposition')
             filename=part.get_filename()
-            if filename.startswith('=?'): # parse the "Q-encoding"
-                filename_qp_list = filename.split('?')
-                if filename_qp_list[2] in ["Q", "B", 'q', 'b']:
-                    cset_filename = cset_sanitize(filename_qp_list[1]) # FIXME: what if multiline filename has different encoding between lines ? (can it happen ?)
-                    filename_tmp = ""
-                    nlines = int((len(filename_qp_list) - 1) / 4)
-                    for k in range(nlines):
-                        filename_tmp += filename_qp_list[3+4*k]
-                    try:
-                        filename = quopri.decodestring(filename_tmp).decode(cset_filename) # filename_qp_list[3]
-                    except UnicodeDecodeError:
-                        filename = quopri.decodestring(filename_tmp).decode('iso8859-1') # Handle case where utf-8 is announced but the real encoding is different (I only got this bug once and the real encoding was iso8859-1). FIXME: handle more cases i.e. guess the real encoding
-
+            filename = qdecode(filename)
             filecontents = part.get_payload(decode=True)
             if (filename=="signature.asc" or filename=='PGP.sig') and not 'signature' in msgdec:
                 msgdec['signature'] = filecontents.decode()
@@ -494,12 +586,6 @@ class MDB():
     def createdb(self):
         cur = self.conn.cursor() # FIXME: "contacts" and "attachment" tables are still unused
         cur.executescript('''
-            drop table if exists contacts;
-            create table contacts(
-                id integer primary key autoincrement,
-                name text,
-                email text
-            );
             drop table if exists messages;
             create table messages(
                 id integer primary key autoincrement,
@@ -523,15 +609,6 @@ class MDB():
             );
             create index messages_gm_id_idx on messages(gm_id);
 
-            drop table if exists attachments;
-            create table attachments(
-                id integer primary key autoincrement,
-                messageid integer,
-                name text,
-                size integer,
-                hash text
-            );
-
             PRAGMA main.page_size=4096;
             PRAGMA main.cache_size=10000;
             PRAGMA main.locking_mode=EXCLUSIVE;
@@ -545,15 +622,14 @@ class MDB():
             return True
         return False
 
-    def addmail(self, m, j):
+    def addmail(self, m):
         cur = self.conn.cursor()
         cur.execute("insert into messages values (null, ?,?,?,?, ?,?,?,?, ?,?,?,?, ?, ?,?,?,?)", (
-            j["msg_id"], int(j["thread_ids"]), m['labelstr'], int(j['gm_id']),
+            m["msg_id"], m["thread_id"], m['labelstr'], m['gm_id'],
             int(m['Date_parsed']), m['From'], m['To'], m['Cc'],
             m["Subject"], m['Body'], m['BodyHTML'], '¤'.join(m["Attachments"]), m['flags'], m["signature"],
             m["Size"],m["SizeAtt"],m["NumAtt"]
         ))
-
 
 def usage():
     print("""Usage :
@@ -569,7 +645,9 @@ if __name__ == "__main__":
     if opmode=="createdb":
         gmvault_dir=sys.argv[2]
         outdir=sys.argv[3]
-        scandir(gmvault_dir + "/db", outdir) # FIXME: better name than "scandir". Place it within MDB class...
+        scandir_gmvault(gmvault_dir + "/db", outdir) # FIXME: better name than "scandir". Place it within MDB class...
+    elif opmode=="mbox":
+        scan_mbox(sys.argv[2],sys.argv[3])
     elif opmode=="gui":
         dbfile=sys.argv[2]
         gui(dbfile)
