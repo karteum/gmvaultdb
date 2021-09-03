@@ -45,6 +45,7 @@ from PySide2.QtWidgets import *
 from PySide2.QtCore import *
 from PySide2.QtSql import *
 from PySide2.QtGui import *
+import argparse
 
 def gui(dbfile):
     #cwd = '' if os.path.dirname(dbfile).startswith('/') else os.getcwd()+'/'
@@ -254,10 +255,10 @@ def mbox_messages(mboxfile):
     text=''
     with open(mboxfile,'r',encoding='utf8') as f:
         for line in f:
-            if line.startswith('From ') and lprev=='\n': # FIXME: more reliable trigger ?
+            if line.startswith('From ') and lprev=='\n' and "@xxx" in line: # FIXME: more reliable trigger ?
                 #msg = email.message_from_bytes(text.encode())
                 msg = email.message_from_string(text)
-                msg.set_unixfrom(line)
+                msg.set_unixfrom(line) # FIXME: takes the "from" of next message instead of current
                 text=''
                 yield msg
             lprev=line
@@ -272,7 +273,7 @@ def mbox_messages2(mboxfile):
         mm = mmap.mmap(f.fileno(), 0)
         i1=0
         while i1 < mlen:
-            i2 = mm.find(b'\r\n\r\nFrom ', i1)
+            i2 = mm.find(b'\r\n\r\nFrom ', i1) # FIXME: more reliable trigger ?
             if i2==-1: # FIXME: needed ?
                 print('ret')
                 return
@@ -633,23 +634,26 @@ class MDB():
             m["Size"],m["SizeAtt"],m["NumAtt"]
         ))
 
-def usage():
-    print("""Usage :
-    gmvault_sql createdb gmvault_dir out_dir : create out_dir with mails.db file and subdirs with attachments
-    gmvault_sql gui db_file
-    """)
-
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        usage()
-        exit()
-    opmode=sys.argv[1] # FIXME: handle errors !
-    if opmode=="createdb":
-        gmvault_dir=sys.argv[2]
-        outdir=sys.argv[3]
-        scandir_gmvault(gmvault_dir + "/db", outdir) # FIXME: better name than "scandir". Place it within MDB class...
-    elif opmode=="mbox":
-        scan_mbox(sys.argv[2],sys.argv[3])
-    elif opmode=="gui":
-        dbfile=sys.argv[2]
-        gui(dbfile)
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="subcommand", required=True)
+
+    parser_createdb = subparsers.add_parser('createdb', help="Scan directory")
+    parser_createdb.add_argument("gmvault_dir", help="GMVault dir or mountpoint")
+    parser_createdb.add_argument("outdir", help="Output dir")
+
+    parser_mbox = subparsers.add_parser('mbox', help="Scan MBox from Google Takeout")
+    parser_mbox.add_argument("mboxfile", help="MBox file")
+    parser_mbox.add_argument("outdir", help="Output dir")
+
+    parser_gui = subparsers.add_parser('gui', help="Launch GUI")
+    parser_gui.add_argument("dbfile", help="DB file")
+
+    args = parser.parse_args()
+
+    if args.subcommand=="createdb":
+        scandir_gmvault(args.gmvault_dir + "/db", args.outdir)
+    elif args.subcommand=="mbox":
+        scan_mbox(args.mboxfile,args.outdir)
+    elif args.subcommand=="gui":
+        gui(args.dbfile)
